@@ -61,6 +61,44 @@ void loop() {
 }
 ```
 
+## Optional firmware upload
+
+The default `MDS_HTTP http;` creates no upload routes and does not link the upload
+implementation. Opt in at construction, before registering application routes:
+
+```cpp
+MDS_HTTP http(MDS_HTTP::Options{MDS_HTTP::UploadMode::Enabled});
+bool shouldReboot = false;
+
+// Register application-owned output and reboot policy before calling begin().
+void configureUploadCallbacks() {
+    http.setStatusCallback([](const String& message) {
+        // Send library diagnostics to the application output.
+        Serial.println(message);
+    });
+
+    http.setUploadCompleteCallback([]() {
+        // Schedule a reboot in loop() after the successful response has been sent.
+        shouldReboot = true;
+    });
+}
+```
+
+This registers GET and POST `/upload`, including the browser form. Upload one
+firmware binary in the `firmware` multipart field. The board updater validates
+the image before the success response. The library does not reboot; the
+application handles `shouldReboot` after servicing HTTP. Both callback setters
+accept `nullptr` to clear their callback. With no status callback, uploads are
+silent. Listening and Wi-Fi readiness remain application responsibilities.
+
+`error()` returns `Error::None`, `InvalidUpload`, `UploadStartFailed`,
+`UploadWriteFailed`, `UploadFinalizeFailed`, or `UploadAborted`. `lastError()`
+returns diagnostic text. A new upload clears the previous failure; ordinary
+requests, callback registration and listener restarts preserve it. Failed,
+missing, empty or incomplete uploads never invoke the completion callback.
+Stopping or destroying the server cancels an active upload; routes remain
+registered across `stop()` and `begin()`.
+
 ## Documentation
 
 Detailed design and API documentation: [MDS_HTTP](https://home.marcspencer.com/mds-http).
