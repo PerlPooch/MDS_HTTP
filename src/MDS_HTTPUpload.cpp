@@ -1,6 +1,6 @@
 /*
  * ===========================================================================
- * MDS_HTTP 0.1.0 - https://home.marcspencer.com/mds-http
+ * MDS_HTTP 0.2.0 - https://home.marcspencer.com/mds-http
  *
  * Copyright (c) 2026 Marc D. Spencer.
  * All Rights Reserved under the applicable license.

@@ -1,6 +1,13 @@
-# MDS_HTTP
+# MDS_HTTP 0.2.0
 
 A lightweight wrapper for starting, servicing, and stopping a web server. Applications define their own routes.
+
+## Migration from 0.1.0
+
+Register `setNetworkReadyCallback()` before expecting the listener to start.
+`begin()` enables the service; `tick()` manages listening as readiness changes.
+Missing or cleared callbacks mean unavailable. `stop()` disables automatic restart
+until another explicit `begin()`, while network loss only suspends listening.
 
 ## Requirements
 
