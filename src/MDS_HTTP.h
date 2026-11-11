@@ -46,6 +46,9 @@ public:
 		UploadMode firmwareUpload = UploadMode::Disabled;
 	};
 
+	// Report whether the network can accept HTTP requests.
+	using ReadinessCallback = std::function<bool()>;
+
 	using StatusCallback = std::function<void(const String&)>;
 	using UploadCompleteCallback = std::function<void()>;
 
@@ -64,16 +67,16 @@ public:
 	// Prevent assignment of an object that owns a web server.
 	MDS_HTTP& operator=(const MDS_HTTP&) = delete;
 
-	// Start listening; repeated calls while running have no effect.
+	// Enable listening when the network callback is ready; repeated calls are safe.
 	void begin();
 
-	// Dispatch requests while running.
+	// Reconcile network readiness and dispatch requests while listening.
 	void tick();
 
-	// Stop listening; route registrations are retained for the next begin().
+	// Disable listening until begin(), cancel uploads, and retain registered routes.
 	void stop();
 
-	// Report whether begin() has been called without a subsequent stop().
+	// Report whether the listener is currently running, independently of enablement.
 	bool running() const {
 		return running_;
 	}
@@ -98,7 +101,13 @@ public:
 		return errorText_;
 	}
 
-	// Register upload diagnostics; nullptr clears the callback and no output is printed directly.
+	// Query connectivity during begin()/tick(); an unset callback means unavailable.
+	// Keep the callback nonblocking; nullptr clears it for the next lifecycle check.
+	void setNetworkReadyCallback(ReadinessCallback callback) {
+		networkReadyCallback_ = callback;
+	}
+
+	// Register listener and upload diagnostics; nullptr clears the callback and no output is printed directly.
 	void setStatusCallback(StatusCallback callback) {
 		statusCallback_ = callback;
 	}
@@ -109,7 +118,13 @@ public:
 	}
 
 private:
-	// Deliver an upload status message through the application callback.
+	// Start or suspend the listener according to enablement and network readiness.
+	void updateListener();
+
+	// Cancel any upload and close the listener without changing enablement.
+	void stopListener();
+
+	// Deliver a listener or upload status message through the application callback.
 	void status(const char* message);
 
 	// Record an upload failure and notify the application.
@@ -131,7 +146,9 @@ private:
 	void abortUpload();
 
 	MDS_HTTPServer server_;
+	bool enabled_ = false;
 	bool running_ = false;
+	ReadinessCallback networkReadyCallback_;
 	Error error_ = Error::None;
 	const char* errorText_ = "";
 	StatusCallback statusCallback_;

@@ -25,6 +25,10 @@ int main() {
 	assert(String(http.lastError()).empty());
 	http.tick();
 	assert(server.ticks == 0);
+	http.setNetworkReadyCallback([]() {
+		// Supply connectivity for the explicit lifecycle scenario.
+		return true;
+	});
 	http.begin();
 	http.begin();
 	assert(server.starts == 1 && http.running());

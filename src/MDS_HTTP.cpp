@@ -25,7 +25,7 @@ MDS_HTTP::~MDS_HTTP() {
 	}
 }
 
-// Deliver an upload status message through the application callback.
+// Deliver a listener or upload status message through the application callback.
 void MDS_HTTP::status(const char* message) {
 	if (statusCallback_) {
 		statusCallback_(String(message));
@@ -45,23 +45,48 @@ void MDS_HTTP::clearError() {
 	errorText_ = "";
 }
 
-// Start listening unless this server is already running.
+// Enable the service and immediately honor the current network prerequisite.
 void MDS_HTTP::begin() {
-	if (!running_) {
-		server_.begin();
-		running_ = true;
-	}
+	enabled_ = true;
+	updateListener();
 }
 
-// Dispatch pending HTTP requests only while the server is running.
+// Reconcile connectivity before dispatching requests on an active listener.
 void MDS_HTTP::tick() {
+	updateListener();
+
 	if (running_) {
 		server_.handleClient();
 	}
 }
 
-// Stop listening while keeping routes registered for a later begin().
+// Disable automatic restarts until begin() is explicitly called again.
 void MDS_HTTP::stop() {
+	enabled_ = false;
+	stopListener();
+}
+
+// Suspend on network loss without forgetting the application's intent to listen.
+void MDS_HTTP::updateListener() {
+	const bool networkReady = enabled_ && networkReadyCallback_ && networkReadyCallback_();
+
+	if (!networkReady) {
+		if (running_) {
+			stopListener();
+		}
+
+		return;
+	}
+
+	if (!running_) {
+		server_.begin();
+		running_ = true;
+		status("HTTP: listening");
+	}
+}
+
+// Release upload resources and close the listener while preserving its routes.
+void MDS_HTTP::stopListener() {
 	if (cancelUpload_) {
 		cancelUpload_();
 	}
@@ -69,5 +94,6 @@ void MDS_HTTP::stop() {
 	if (running_) {
 		server_.stop();
 		running_ = false;
+		status("HTTP: stopped");
 	}
 }

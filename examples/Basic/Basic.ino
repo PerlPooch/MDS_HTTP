@@ -18,6 +18,7 @@
 MDS_WiFi wifi;
 MDS_HTTP http;  // Port 80 by default.
 
+// Register routes and connectivity before enabling HTTP.
 void setup() {
     Serial.begin(115200);
 
@@ -33,23 +34,26 @@ void setup() {
         MDS_WiFi::ConnectionPolicy::RetrySavedNetworkAsync;
 
     wifi.begin(options);
-}
 
-void loop() {
-    wifi.tick();
-
-    if (wifi.ready()) {
-        if (!http.running()) {
-            http.begin();
-
+    http.setNetworkReadyCallback([]() {
+        // Let the connection manager define station and IP readiness.
+        return wifi.ready();
+    });
+    http.setStatusCallback([](const String& message) {
+        // Report listener transitions without managing its lifecycle here.
+        Serial.println(message);
+        if (http.running()) {
             Serial.print("Open http://");
             Serial.println(WiFi.localIP());
         }
-    } else {
-        http.stop();
-    }
+    });
+    http.begin();
+}
 
-    http.tick();  // Service incoming requests.
+// Service connectivity and HTTP while other application work continues.
+void loop() {
+    wifi.tick();
+    http.tick();
 
     // Do other application work here.
 }

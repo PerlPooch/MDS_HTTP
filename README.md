@@ -15,7 +15,7 @@ Place the `MDS_HTTP` folder in your Arduino sketchbook's `libraries` directory. 
 
 Serve a greeting at `/` using the board package's web server. This example uses **MDS_WiFi** and **WiFiManager 2.0.17 or later** for connectivity.
 
-With no saved Wi-Fi credentials, join the `Web Demo <MAC>` access point (password `12345678`) and enter your network details in its portal. Once connected, open the URL printed on Serial from a browser on the same network. The application starts and stops HTTP with Wi-Fi readiness; registered routes remain available after reconnection.
+With no saved Wi-Fi credentials, join the `Web Demo <MAC>` access point (password `12345678`) and enter your network details in its portal. Once connected, open the URL printed on Serial from a browser on the same network. HTTP starts and suspends its listener through a Wi-Fi readiness callback; registered routes remain available after reconnection.
 
 ```cpp
 #include <MDS_WiFi.h>
@@ -24,6 +24,7 @@ With no saved Wi-Fi credentials, join the `Web Demo <MAC>` access point (passwor
 MDS_WiFi wifi;
 MDS_HTTP http;  // Port 80 by default.
 
+// Register routes and connectivity before enabling HTTP.
 void setup() {
     Serial.begin(115200);
 
@@ -39,23 +40,26 @@ void setup() {
         MDS_WiFi::ConnectionPolicy::RetrySavedNetworkAsync;
 
     wifi.begin(options);
-}
 
-void loop() {
-    wifi.tick();
-
-    if (wifi.ready()) {
-        if (!http.running()) {
-            http.begin();
-
+    http.setNetworkReadyCallback([]() {
+        // Let the connection manager define station and IP readiness.
+        return wifi.ready();
+    });
+    http.setStatusCallback([](const String& message) {
+        // Report listener transitions without managing its lifecycle here.
+        Serial.println(message);
+        if (http.running()) {
             Serial.print("Open http://");
             Serial.println(WiFi.localIP());
         }
-    } else {
-        http.stop();
-    }
+    });
+    http.begin();
+}
 
-    http.tick();  // Service incoming requests.
+// Service connectivity and HTTP while other application work continues.
+void loop() {
+    wifi.tick();
+    http.tick();
 
     // Do other application work here.
 }
@@ -70,7 +74,7 @@ implementation. Opt in at construction, before registering application routes:
 MDS_HTTP http(MDS_HTTP::Options{MDS_HTTP::UploadMode::Enabled});
 bool shouldReboot = false;
 
-// Register application-owned output and reboot policy before calling begin().
+// Register application-owned output and reboot policy before enabling HTTP.
 void configureUploadCallbacks() {
     http.setStatusCallback([](const String& message) {
         // Send library diagnostics to the application output.
@@ -89,7 +93,7 @@ firmware binary in the `firmware` multipart field. The board updater validates
 the image before the success response. The library does not reboot; the
 application handles `shouldReboot` after servicing HTTP. Both callback setters
 accept `nullptr` to clear their callback. With no status callback, uploads are
-silent. Listening and Wi-Fi readiness remain application responsibilities.
+silent. Register a network-ready callback and call begin() to enable listening.
 
 `error()` returns `Error::None`, `InvalidUpload`, `UploadStartFailed`,
 `UploadWriteFailed`, `UploadFinalizeFailed`, or `UploadAborted`. `lastError()`
@@ -110,3 +114,23 @@ Firmware and software: **MPL-2.0**. Documentation and website: **CC BY-SA 4.0**.
 ## Contributions
 
 Contributions require a Developer Certificate of Origin (DCO) sign-off. Use `git commit -s` to add a `Signed-off-by` line to each contribution commit.
+
+## Readiness and explicit shutdown
+
+Register `setNetworkReadyCallback()` with a quick, nonblocking `bool()` callback.
+`begin()` enables HTTP and checks readiness immediately; `tick()` checks it again
+before dispatching requests. An unset callback means unavailable. Passing
+`nullptr` clears the source; the next `tick()` suspends an active listener.
+Captured objects must outlive their callback registrations. Missing readiness is
+an ordinary wait and does not replace existing errors.
+
+Network loss closes the listener and cancels any in-progress firmware upload;
+reconnection starts listening again with the registered routes intact. Aborting
+an active upload records `UploadAborted`, as explicit shutdown does. Listener
+transitions emit `HTTP: listening` or `HTTP: stopped` through the status callback.
+Repeated waits and unchanged readiness do not repeat those messages.
+
+`stop()` explicitly disables HTTP. Further ticks or callback changes cannot
+restart it until `begin()` is called again. This keeps reset/reboot shutdown
+separate from temporary network loss. `running()` reports the actual listener,
+so it remains false while an enabled service is waiting for connectivity.

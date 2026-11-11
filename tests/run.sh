@@ -11,6 +11,10 @@ for test_arch in ESP32 ESP8266; do
     "$TEST_BUILD/basic-$test_arch"
     c++ -std=c++17 -Wall -Wextra -Werror -DARDUINO_ARCH_$test_arch \
         -I"$TEST_DIR/host" -I"$TEST_DIR/../src" \
+        "$TEST_DIR/readiness.cpp" "$TEST_DIR/../src/MDS_HTTP.cpp" -o "$TEST_BUILD/readiness-$test_arch"
+    "$TEST_BUILD/readiness-$test_arch"
+    c++ -std=c++17 -Wall -Wextra -Werror -DARDUINO_ARCH_$test_arch \
+        -I"$TEST_DIR/host" -I"$TEST_DIR/../src" \
         "$TEST_DIR/upload.cpp" "$TEST_DIR/../src/MDS_HTTP.cpp" \
         "$TEST_DIR/../src/MDS_HTTPUpload.cpp" -o "$TEST_BUILD/upload-$test_arch"
     "$TEST_BUILD/upload-$test_arch"

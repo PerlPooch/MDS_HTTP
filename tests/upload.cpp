@@ -49,7 +49,13 @@ int main() {
 		assert(server.body == "Update OK. Rebooting...\n");
 		++completions;
 	});
+	bool networkReady = true;
+	http.setNetworkReadyCallback([&]() {
+		// Supply live connectivity for lifecycle and upload scenarios.
+		return networkReady;
+	});
 	http.begin();
+	messages.clear();
 	server.request(HTTP_GET);
 	assert(server.code == 200 && server.body.find("/upload") != String::npos);
 	server.request(HTTP_POST);
@@ -138,6 +144,33 @@ int main() {
 	assert(http.error() == Error::InvalidUpload);
 	upload(http);
 	assert(http.error() == Error::None && completions == 4);
+
+	// Losing readiness aborts a partial image once and preserves its error on reconnect.
+	server.chunk(UPLOAD_FILE_START);
+	assert(Update.active);
+	const int abortsBeforeDisconnect = Update.aborts;
+	networkReady = false;
+	http.tick();
+	assert(!http.running() && !Update.active);
+	assert(http.error() == Error::UploadAborted && completions == 4);
+	assert(Update.aborts == abortsBeforeDisconnect + 1);
+	http.tick();
+	assert(Update.aborts == abortsBeforeDisconnect + 1);
+	networkReady = true;
+	http.tick();
+	assert(http.running() && http.error() == Error::UploadAborted);
+
+	// Clearing the readiness source has the same cleanup behavior as network loss.
+	server.chunk(UPLOAD_FILE_START);
+	http.setNetworkReadyCallback(nullptr);
+	http.tick();
+	assert(!http.running() && !Update.active && http.error() == Error::UploadAborted);
+	http.setNetworkReadyCallback([&]() {
+		// Restore the application's connectivity source after clearing it.
+		return networkReady;
+	});
+	http.tick();
+	assert(http.running() && http.error() == Error::UploadAborted);
 
 	const int beforeDestruction = Update.aborts;
 	{
