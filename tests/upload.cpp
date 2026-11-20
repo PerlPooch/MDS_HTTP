@@ -17,7 +17,9 @@
 #include <cassert>
 #include <cstdio>
 #include <vector>
+#include <algorithm>
 
+using State = MDS_HTTP::State;
 using Error = MDS_HTTP::Error;
 using UploadMode = MDS_HTTP::UploadMode;
 
@@ -25,9 +27,15 @@ using UploadMode = MDS_HTTP::UploadMode;
 static void upload(MDS_HTTP& http) {
 	auto& server = http.server();
 	server.chunk(UPLOAD_FILE_START);
+	assert(http.running());
+	assert(http.state() == (http.error() == Error::None ? State::Uploading : State::UploadComplete));
 	server.chunk(UPLOAD_FILE_WRITE, 16);
 	server.chunk(UPLOAD_FILE_END, 16);
+	if (http.error() == Error::None) {
+		assert(http.state() == State::Uploading);
+	}
 	server.request(HTTP_POST);
+	assert(http.state() == State::UploadComplete && http.running());
 }
 
 // Verify optional routes, failure recovery, callbacks and update resource cleanup.
@@ -46,6 +54,7 @@ int main() {
 	http.setUploadCompleteCallback([&]() {
 		// A successful HTTP response must already exist when the client schedules reboot.
 		assert(server.code == 200);
+		assert(http.state() == State::UploadComplete);
 		assert(server.body == "Update OK. Rebooting...\n");
 		++completions;
 	});
@@ -55,6 +64,19 @@ int main() {
 		return networkReady;
 	});
 	http.begin();
+	int updaterStartsAtLastCompletion = Update.begins;
+	int uploadStartNotifications = 0;
+	http.setStateChangeCallback([&](State previous, State current) {
+		// Pre-upload notification must precede updater initialization and writes.
+		assert(previous != current && http.state() == current);
+		if (current == State::Uploading) {
+			assert(!Update.active && Update.begins == updaterStartsAtLastCompletion);
+			assert(http.error() == Error::None);
+			++uploadStartNotifications;
+		} else if (current == State::UploadComplete) {
+			updaterStartsAtLastCompletion = Update.begins;
+		}
+	});
 	messages.clear();
 	server.request(HTTP_GET);
 	assert(server.code == 200 && server.body.find("/upload") != String::npos);
@@ -66,7 +88,11 @@ int main() {
 	assert(completions == 1 && http.error() == Error::None);
 	assert(String(http.lastError()).empty());
 	assert(messages.front() == "OTA: Missing or incomplete firmware upload");
-	assert(messages.back() == "OTA: Success.");
+	assert(std::find(messages.begin(), messages.end(), "OTA: Success.") != messages.end());
+	assert(messages.back() == "HTTP: Uploading -> UploadComplete");
+	const int listenerStartsAfterUpload = server.starts;
+	http.tick();
+	assert(http.state() == State::UploadComplete && server.starts == listenerStartsAfterUpload);
 
 	Update.beginOK = false;
 	upload(http);
@@ -127,6 +153,7 @@ int main() {
 	server.chunk(UPLOAD_FILE_START);
 	server.chunk(UPLOAD_FILE_ABORTED);
 	assert(http.error() == Error::UploadAborted && !Update.active);
+	assert(http.state() == State::UploadComplete);
 	upload(http);
 	assert(completions == 3 && http.error() == Error::None);
 	server.chunk(UPLOAD_FILE_START);
@@ -145,6 +172,14 @@ int main() {
 	upload(http);
 	assert(http.error() == Error::None && completions == 4);
 
+	std::vector<std::pair<State, Error>> transitions;
+	http.setStatusCallback([&](const String& message) {
+		// Applications can observe completion before a subsequent listener-state change.
+		if (message.find(" -> ") != String::npos) {
+			transitions.push_back({http.state(), http.error()});
+		}
+	});
+
 	// Losing readiness aborts a partial image once and preserves its error on reconnect.
 	server.chunk(UPLOAD_FILE_START);
 	assert(Update.active);
@@ -152,6 +187,11 @@ int main() {
 	networkReady = false;
 	http.tick();
 	assert(!http.running() && !Update.active);
+	assert(http.state() == State::WaitingForNetwork);
+	assert(transitions.size() == 3);
+	assert(transitions[0].first == State::Uploading);
+	assert(transitions[1].first == State::UploadComplete && transitions[1].second == Error::UploadAborted);
+	assert(transitions[2].first == State::WaitingForNetwork);
 	assert(http.error() == Error::UploadAborted && completions == 4);
 	assert(Update.aborts == abortsBeforeDisconnect + 1);
 	http.tick();
@@ -159,6 +199,7 @@ int main() {
 	networkReady = true;
 	http.tick();
 	assert(http.running() && http.error() == Error::UploadAborted);
+	assert(http.state() == State::Listening);
 
 	// Clearing the readiness source has the same cleanup behavior as network loss.
 	server.chunk(UPLOAD_FILE_START);
@@ -171,10 +212,32 @@ int main() {
 	});
 	http.tick();
 	assert(http.running() && http.error() == Error::UploadAborted);
+	assert(http.state() == State::Listening);
+
+	// Explicit shutdown reports the interrupted upload before committing Stopped.
+	transitions.clear();
+	server.chunk(UPLOAD_FILE_START);
+	http.stop();
+	assert(http.state() == State::Stopped && !http.running());
+	assert(transitions.size() == 3);
+	assert(transitions[1].first == State::UploadComplete && transitions[1].second == Error::UploadAborted);
+	assert(transitions[2].first == State::Stopped);
+	const auto stoppedTransitions = transitions.size();
+	http.tick();
+	http.stop();
+	assert(transitions.size() == stoppedTransitions);
+
+	assert(uploadStartNotifications > 0);
+	http.setStateChangeCallback(nullptr);
 
 	const int beforeDestruction = Update.aborts;
 	{
 		MDS_HTTP partial(MDS_HTTP::Options{UploadMode::Enabled});
+		partial.setNetworkReadyCallback([]() {
+			// Supply connectivity before starting the destructor-cleanup scenario.
+			return true;
+		});
+		partial.begin();
 		partial.server().chunk(UPLOAD_FILE_START);
 		assert(Update.active);
 	}

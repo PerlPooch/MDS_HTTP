@@ -1,4 +1,4 @@
-# MDS_HTTP 0.2.0
+# MDS_HTTP 0.4.0
 
 A lightweight wrapper for starting, servicing, and stopping a web server. Applications define their own routes.
 
@@ -55,7 +55,10 @@ void setup() {
     http.setStatusCallback([](const String& message) {
         // Report listener transitions without managing its lifecycle here.
         Serial.println(message);
-        if (http.running()) {
+    });
+    http.setStateChangeCallback([](MDS_HTTP::State, MDS_HTTP::State current) {
+        // Announce application availability from typed state, independently of diagnostics.
+        if (current == MDS_HTTP::State::Listening) {
             Serial.print("Open http://");
             Serial.println(WiFi.localIP());
         }
@@ -134,10 +137,26 @@ an ordinary wait and does not replace existing errors.
 Network loss closes the listener and cancels any in-progress firmware upload;
 reconnection starts listening again with the registered routes intact. Aborting
 an active upload records `UploadAborted`, as explicit shutdown does. Listener
-transitions emit `HTTP: listening` or `HTTP: stopped` through the status callback.
+transitions emit `HTTP: Previous -> Next` through the status callback.
 Repeated waits and unchanged readiness do not repeat those messages.
 
 `stop()` explicitly disables HTTP. Further ticks or callback changes cannot
 restart it until `begin()` is called again. This keeps reset/reboot shutdown
 separate from temporary network loss. `running()` reports the actual listener,
 so it remains false while an enabled service is waiting for connectivity.
+
+## Lifecycle state
+
+`state()` returns `Stopped`, `WaitingForNetwork`, `Listening`, `Uploading`, or
+`UploadComplete`; `stateName(state)` provides its diagnostic name. Upload completion
+includes success and failure, while the existing upload-complete callback remains
+success-only. See [state transitions](docs/State-Transitions.md) for the diagram
+and notification timing.
+
+`setStateChangeCallback()` accepts an optional `void(State previous, State current)`
+callback for committed changes, independently of diagnostic output. Pass `nullptr`
+to clear it. Keep callbacks brief and do not re-enter the service.
+
+Entering `Uploading` notifies the state callback before `Update.begin()` and any
+firmware write. The request is already underway; this is a preparation hook, not
+an upload approval hook.

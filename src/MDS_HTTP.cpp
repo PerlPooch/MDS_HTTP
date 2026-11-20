@@ -1,6 +1,6 @@
 /*
  * ===========================================================================
- * MDS_HTTP 0.2.0 - https://home.marcspencer.com/mds-http
+ * MDS_HTTP 0.4.0 - https://home.marcspencer.com/mds-http
  *
  * Copyright (c) 2026 Marc D. Spencer.
  * All Rights Reserved under the applicable license.
@@ -45,55 +45,88 @@ void MDS_HTTP::clearError() {
 	errorText_ = "";
 }
 
+// Translate lifecycle states into stable diagnostic names.
+const char* MDS_HTTP::stateName(State state) {
+	switch (state) {
+		case State::Stopped:
+			return "Stopped";
+		case State::WaitingForNetwork:
+			return "WaitingForNetwork";
+		case State::Listening:
+			return "Listening";
+		case State::Uploading:
+			return "Uploading";
+		case State::UploadComplete:
+			return "UploadComplete";
+	}
+
+	return "Unknown";
+}
+
+// Upload progress and completion retain the same active listener.
+bool MDS_HTTP::isListenerState(State state) {
+	return state == State::Listening || state == State::Uploading || state == State::UploadComplete;
+}
+
+// Centralize listener actions and notify applications after each committed state change.
+void MDS_HTTP::transitionTo(State next) {
+	if (state_ == next) {
+		return;
+	}
+
+	const bool nextHasListener = isListenerState(next);
+	if (running() && !nextHasListener) {
+		if (cancelUpload_) {
+			// Cancellation reports upload completion before the listener leaves service.
+			cancelUpload_();
+		}
+
+		server_.stop();
+	} else if (!running() && nextHasListener) {
+		server_.begin();
+	}
+
+	const State previous = state_;
+	state_ = next;
+
+	if (stateChangeCallback_) {
+		stateChangeCallback_(previous, next);
+	}
+
+	const String message = String("HTTP: ") + stateName(previous) + " -> " + stateName(next);
+	status(message.c_str());
+}
+
 // Enable the service and immediately honor the current network prerequisite.
 void MDS_HTTP::begin() {
-	enabled_ = true;
 	updateListener();
 }
 
 // Reconcile connectivity before dispatching requests on an active listener.
 void MDS_HTTP::tick() {
+	if (state_ == State::Stopped) {
+		return;
+	}
+
 	updateListener();
 
-	if (running_) {
+	if (running()) {
 		server_.handleClient();
 	}
 }
 
 // Disable automatic restarts until begin() is explicitly called again.
 void MDS_HTTP::stop() {
-	enabled_ = false;
-	stopListener();
+	transitionTo(State::Stopped);
 }
 
-// Suspend on network loss without forgetting the application's intent to listen.
+// Preserve upload states while connected and suspend listening when readiness is lost.
 void MDS_HTTP::updateListener() {
-	const bool networkReady = enabled_ && networkReadyCallback_ && networkReadyCallback_();
+	const bool networkReady = networkReadyCallback_ && networkReadyCallback_();
 
 	if (!networkReady) {
-		if (running_) {
-			stopListener();
-		}
-
-		return;
-	}
-
-	if (!running_) {
-		server_.begin();
-		running_ = true;
-		status("HTTP: listening");
-	}
-}
-
-// Release upload resources and close the listener while preserving its routes.
-void MDS_HTTP::stopListener() {
-	if (cancelUpload_) {
-		cancelUpload_();
-	}
-
-	if (running_) {
-		server_.stop();
-		running_ = false;
-		status("HTTP: stopped");
+		transitionTo(State::WaitingForNetwork);
+	} else if (!running()) {
+		transitionTo(State::Listening);
 	}
 }

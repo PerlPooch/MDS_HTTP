@@ -1,6 +1,6 @@
 /*
  * ===========================================================================
- * MDS_HTTP 0.2.0 - https://home.marcspencer.com/mds-http
+ * MDS_HTTP 0.4.0 - https://home.marcspencer.com/mds-http
  *
  * Copyright (c) 2026 Marc D. Spencer.
  * All Rights Reserved under the applicable license.
@@ -28,6 +28,14 @@ using MDS_HTTPServer = WebServer;
 // Thin server owner; applications register routes directly through server().
 class MDS_HTTP {
 public:
+	enum class State {
+		Stopped,
+		WaitingForNetwork,
+		Listening,
+		Uploading,
+		UploadComplete
+	};
+
 	enum class UploadMode {
 		Disabled,
 		Enabled
@@ -48,6 +56,9 @@ public:
 
 	// Report whether the network can accept HTTP requests.
 	using ReadinessCallback = std::function<bool()>;
+
+	// Observe committed lifecycle changes independently of diagnostic messages.
+	using StateChangeCallback = std::function<void(State previous, State current)>;
 
 	using StatusCallback = std::function<void(const String&)>;
 	using UploadCompleteCallback = std::function<void()>;
@@ -76,9 +87,17 @@ public:
 	// Disable listening until begin(), cancel uploads, and retain registered routes.
 	void stop();
 
+	// Return the lifecycle snapshot last reconciled by service or upload handling.
+	State state() const {
+		return state_;
+	}
+
+	// Return a stable diagnostic name for a lifecycle state.
+	static const char* stateName(State state);
+
 	// Report whether the listener is currently running, independently of enablement.
 	bool running() const {
-		return running_;
+		return isListenerState(state_);
 	}
 
 	// Borrow the owned server for route registration and request/response access.
@@ -107,6 +126,12 @@ public:
 		networkReadyCallback_ = callback;
 	}
 
+	// Register synchronous state changes; nullptr clears the optional callback.
+	// Keep callbacks brief and do not re-enter the service.
+	void setStateChangeCallback(StateChangeCallback callback) {
+		stateChangeCallback_ = callback;
+	}
+
 	// Register listener and upload diagnostics; nullptr clears the callback and no output is printed directly.
 	void setStatusCallback(StatusCallback callback) {
 		statusCallback_ = callback;
@@ -118,11 +143,14 @@ public:
 	}
 
 private:
+	// Apply lifecycle changes and listener entry/exit actions once per transition.
+	void transitionTo(State next);
+
+	// Identify states in which the HTTP listener remains active.
+	static bool isListenerState(State state);
+
 	// Start or suspend the listener according to enablement and network readiness.
 	void updateListener();
-
-	// Cancel any upload and close the listener without changing enablement.
-	void stopListener();
 
 	// Deliver a listener or upload status message through the application callback.
 	void status(const char* message);
@@ -146,12 +174,12 @@ private:
 	void abortUpload();
 
 	MDS_HTTPServer server_;
-	bool enabled_ = false;
-	bool running_ = false;
+	State state_ = State::Stopped;
 	ReadinessCallback networkReadyCallback_;
 	Error error_ = Error::None;
 	const char* errorText_ = "";
 	StatusCallback statusCallback_;
+	StateChangeCallback stateChangeCallback_;
 	UploadCompleteCallback uploadCompleteCallback_;
 
 	// Installed only by the upload constructor, keeping updater code out of basic clients.

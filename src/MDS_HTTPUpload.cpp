@@ -1,6 +1,6 @@
 /*
  * ===========================================================================
- * MDS_HTTP 0.2.0 - https://home.marcspencer.com/mds-http
+ * MDS_HTTP 0.4.0 - https://home.marcspencer.com/mds-http
  *
  * Copyright (c) 2026 Marc D. Spencer.
  * All Rights Reserved under the applicable license.
@@ -42,6 +42,7 @@ MDS_HTTP::MDS_HTTP(const Options& options, uint16_t port) : MDS_HTTP(port) {
 			if (uploadActive_) {
 				abortUpload();
 				fail(Error::UploadAborted, "OTA: Upload aborted");
+				transitionTo(State::UploadComplete);
 			}
 
 			uploadSeen_ = false;
@@ -109,10 +110,12 @@ void MDS_HTTP::handleUploadPost() {
 
 	if (!success) {
 		server_.send(500, "text/plain", lastError());
+		transitionTo(State::UploadComplete);
 		return;
 	}
 
 	server_.send(200, "text/plain", "Update OK. Rebooting...\n");
+	transitionTo(State::UploadComplete);
 
 	if (uploadCompleteCallback_) {
 		uploadCompleteCallback_();
@@ -143,16 +146,19 @@ void MDS_HTTP::handleUploadStream() {
 			if (uploadSeen_) {
 				abortUpload();
 				fail(Error::InvalidUpload, "OTA: Expected one firmware file");
+				transitionTo(State::UploadComplete);
 				return;
 			}
 
 			uploadSeen_ = true;
 			uploadComplete_ = false;
 			clearError();
+			transitionTo(State::Uploading);
 			status("OTA: Start ...");
 
 			if (upload.name != "firmware") {
 				fail(Error::InvalidUpload, "OTA: Expected firmware field");
+				transitionTo(State::UploadComplete);
 				return;
 			}
 
@@ -163,6 +169,7 @@ void MDS_HTTP::handleUploadStream() {
 			if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
 #endif
 				fail(Error::UploadStartFailed, "OTA: Update.begin() failed");
+				transitionTo(State::UploadComplete);
 				return;
 			}
 
@@ -177,6 +184,7 @@ void MDS_HTTP::handleUploadStream() {
 			if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
 				abortUpload();
 				fail(Error::UploadWriteFailed, "OTA: Update.write() failed");
+				transitionTo(State::UploadComplete);
 			}
 			break;
 
@@ -188,6 +196,7 @@ void MDS_HTTP::handleUploadStream() {
 			if (upload.totalSize == 0) {
 				abortUpload();
 				fail(Error::InvalidUpload, "OTA: Empty firmware upload");
+				transitionTo(State::UploadComplete);
 				return;
 			}
 
@@ -199,6 +208,7 @@ void MDS_HTTP::handleUploadStream() {
 			abortUpload();
 			uploadSeen_ = false;
 			fail(Error::UploadAborted, "OTA: Upload aborted");
+			transitionTo(State::UploadComplete);
 			break;
 	}
 }

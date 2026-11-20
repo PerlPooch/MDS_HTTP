@@ -42,7 +42,10 @@ void setup() {
     http.setStatusCallback([](const String& message) {
         // Report listener transitions without managing its lifecycle here.
         Serial.println(message);
-        if (http.running()) {
+    });
+    http.setStateChangeCallback([](MDS_HTTP::State, MDS_HTTP::State current) {
+        // Announce application availability from typed state, independently of diagnostics.
+        if (current == MDS_HTTP::State::Listening) {
             Serial.print("Open http://");
             Serial.println(WiFi.localIP());
         }
