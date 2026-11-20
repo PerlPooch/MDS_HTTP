@@ -20,6 +20,44 @@
 #include <Update.h>
 #endif
 
+namespace {
+
+// Adapt the platform updater to the operations required by the HTTP upload.
+class FirmwareUploadBackend {
+public:
+	// Reserve space in the inactive firmware slot.
+	static bool begin() {
+#if defined(ARDUINO_ARCH_ESP8266)
+		// ESP8266 requires the available sketch space rather than an unknown length.
+		return Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000);
+#else
+		return Update.begin(UPDATE_SIZE_UNKNOWN);
+#endif
+	}
+
+	// Treat a short write as a failed chunk.
+	static bool write(uint8_t* data, size_t size) {
+		return Update.write(data, size) == size;
+	}
+
+	// Validate and activate the image using the bytes received.
+	static bool commit() {
+		return Update.end(true);
+	}
+
+	// Release the updater without activating an unfinished image.
+	static void abort() {
+#if defined(ARDUINO_ARCH_ESP8266)
+		// ESP8266 has no abort() API.
+		Update.end(false);
+#else
+		Update.abort();
+#endif
+	}
+};
+
+} // namespace
+
 // Install upload routes only for applications that construct this optional feature.
 MDS_HTTP::MDS_HTTP(const Options& options, uint16_t port) : MDS_HTTP(port) {
 	if (options.firmwareUpload == UploadMode::Enabled) {
@@ -89,7 +127,7 @@ void MDS_HTTP::handleUploadPost() {
 
 	// Commit only after the complete multipart request has been accepted.
 	if (success) {
-		if (Update.end(true)) {
+		if (FirmwareUploadBackend::commit()) {
 			uploadActive_ = false;
 			clearError();
 			status("OTA: Success.");
@@ -125,12 +163,7 @@ void MDS_HTTP::handleUploadPost() {
 // Abort unfinished writes without validating or activating the partial image.
 void MDS_HTTP::abortUpload() {
 	if (uploadActive_) {
-#if defined(ARDUINO_ARCH_ESP8266)
-		// ESP8266 releases an unfinished update through end(false); it has no abort() API.
-		Update.end(false);
-#else
-		Update.abort();
-#endif
+		FirmwareUploadBackend::abort();
 		uploadActive_ = false;
 	}
 
@@ -162,12 +195,7 @@ void MDS_HTTP::handleUploadStream() {
 				return;
 			}
 
-#if defined(ARDUINO_ARCH_ESP8266)
-			// ESP8266 requires the available sketch space rather than an unknown length.
-			if (!Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000)) {
-#else
-			if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-#endif
+			if (!FirmwareUploadBackend::begin()) {
 				fail(Error::UploadStartFailed, "OTA: Update.begin() failed");
 				transitionTo(State::UploadComplete);
 				return;
@@ -181,7 +209,7 @@ void MDS_HTTP::handleUploadStream() {
 				return;
 			}
 
-			if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+			if (!FirmwareUploadBackend::write(upload.buf, upload.currentSize)) {
 				abortUpload();
 				fail(Error::UploadWriteFailed, "OTA: Update.write() failed");
 				transitionTo(State::UploadComplete);
