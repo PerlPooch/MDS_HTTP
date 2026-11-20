@@ -16,6 +16,8 @@
 
 #include <Arduino.h>
 #include <functional>
+#include <memory>
+#include <vector>
 
 #if defined(ARDUINO_ARCH_ESP8266)
 #include <ESP8266WebServer.h>
@@ -24,6 +26,8 @@ using MDS_HTTPServer = ESP8266WebServer;
 #include <WebServer.h>
 using MDS_HTTPServer = WebServer;
 #endif
+
+class MDS_HTTPUpload;
 
 // Thin server owner; applications register routes directly through server().
 class MDS_HTTP {
@@ -69,7 +73,7 @@ public:
 	// Register optional firmware upload routes before the server starts listening.
 	explicit MDS_HTTP(const Options& options, uint16_t port = 80);
 
-	// Cancel any active firmware write before releasing the server.
+	// Cancel any active upload before releasing the server.
 	~MDS_HTTP();
 
 	// Prevent copying ownership of the web server.
@@ -137,12 +141,17 @@ public:
 		statusCallback_ = callback;
 	}
 
-	// Register successful upload notification after the HTTP response is sent; nullptr clears it.
+	// Register successful firmware upload notification after the response; nullptr clears it.
 	void setUploadCompleteCallback(UploadCompleteCallback callback) {
 		uploadCompleteCallback_ = callback;
 	}
 
+	// Register a unique multipart POST route before starting the server.
+	void addUpload(const char* route, std::unique_ptr<MDS_HTTPUpload> handler);
+
 private:
+	friend class MDS_HTTPUpload;
+
 	// Apply lifecycle changes and listener entry/exit actions once per transition.
 	void transitionTo(State next);
 
@@ -161,17 +170,8 @@ private:
 	// Clear the previous failure when a new upload starts or succeeds.
 	void clearError();
 
-	// Serve the browser firmware selection form.
-	void handleUploadPage();
-
-	// Respond to the completed POST and notify the application only on success.
-	void handleUploadPost();
-
-	// Write firmware chunks and mark their completion, aborting failed transfers.
-	void handleUploadStream();
-
-	// Abort the platform updater and leave the active write state.
-	void abortUpload();
+	// Cancel unfinished requests when the listener stops or is destroyed.
+	void cancelUploads();
 
 	MDS_HTTPServer server_;
 	State state_ = State::Stopped;
@@ -182,9 +182,5 @@ private:
 	StateChangeCallback stateChangeCallback_;
 	UploadCompleteCallback uploadCompleteCallback_;
 
-	// Installed only by the upload constructor, keeping updater code out of basic clients.
-	std::function<void()> cancelUpload_;
-	bool uploadSeen_ = false;
-	bool uploadActive_ = false;
-	bool uploadComplete_ = false;
+	std::vector<std::function<void()>> uploadCancellations_;
 };

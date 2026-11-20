@@ -12,7 +12,7 @@
  * ===========================================================================
  */
 
-#include <MDS_HTTP.h>
+#include <MDS_HTTPUpload.h>
 #include <Update.h>
 #include <cassert>
 #include <cstdio>
@@ -36,6 +36,79 @@ static void upload(MDS_HTTP& http) {
 	}
 	server.request(HTTP_POST);
 	assert(http.state() == State::UploadComplete && http.running());
+}
+
+// Exercise the public backend interface without writing firmware.
+class TestFileUpload final : public MDS_HTTPUpload {
+public:
+	// Accept empty files uploaded through the asset field.
+	TestFileUpload() : MDS_HTTPUpload("asset", true) {
+	}
+
+	int commits = 0;
+	int aborts = 0;
+
+private:
+	// Accept the request without opening real storage.
+	bool begin(const HTTPUpload&) override {
+		return true;
+	}
+
+	// Acknowledge all bytes supplied by the mock server.
+	bool write(uint8_t*, size_t) override {
+		return true;
+	}
+
+	// Record when the request was fully processed.
+	bool commit() override {
+		++commits;
+		return true;
+	}
+
+	// Record cancellation without touching the firmware updater.
+	void abort() override {
+		++aborts;
+	}
+};
+
+// Verify coexistence, per-route failures and shutdown for a second backend.
+static void testFileRoute() {
+	MDS_HTTP http(MDS_HTTP::Options{UploadMode::Enabled});
+	auto& server = http.server();
+	const auto firmwareStream = server.stream;
+	auto* file = new TestFileUpload();
+	http.addUpload("/assets/upload", std::unique_ptr<MDS_HTTPUpload>(file));
+	const auto fileStream = server.stream;
+	http.setNetworkReadyCallback([]() {
+		// Keep both routes active for the test.
+		return true;
+	});
+	http.begin();
+
+	const auto& filePost = server.handlers.at({"/assets/upload", HTTP_POST});
+	const int firmwareEnds = Update.ends;
+	filePost();
+	assert(server.code == 500 && server.body == "Upload: Missing or incomplete file");
+
+	server.stream = firmwareStream;
+	upload(http);
+	assert(Update.ends == firmwareEnds + 1 && http.error() == Error::None);
+
+	server.stream = fileStream;
+	filePost();
+	assert(server.code == 500 && server.body == "Upload: Missing or incomplete file");
+	assert(http.error() == Error::InvalidUpload);
+	server.incoming.name = "asset";
+	server.chunk(UPLOAD_FILE_START);
+	server.chunk(UPLOAD_FILE_END);
+	assert(file->commits == 0);
+	filePost();
+	assert(server.code == 200 && file->commits == 1 && http.error() == Error::None);
+	assert(Update.ends == firmwareEnds + 1);
+
+	server.chunk(UPLOAD_FILE_START);
+	http.stop();
+	assert(file->aborts == 1 && http.error() == Error::UploadAborted && !Update.active);
 }
 
 // Verify optional routes, failure recovery, callbacks and update resource cleanup.
@@ -242,5 +315,6 @@ int main() {
 		assert(Update.active);
 	}
 	assert(Update.aborts == beforeDestruction + 1 && !Update.active);
+	testFileRoute();
 	puts("PASS: HTTP uploads, failures, callback ordering, reconnect and partial-image cleanup.");
 }

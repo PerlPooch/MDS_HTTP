@@ -12,7 +12,9 @@
  * ===========================================================================
  */
 
-#include "MDS_HTTP.h"
+#include "MDS_HTTPUpload.h"
+
+#include <utility>
 
 #if defined(ARDUINO_ARCH_ESP8266)
 #include <Updater.h>
@@ -22,11 +24,17 @@
 
 namespace {
 
-// Adapt the platform updater to the operations required by the HTTP upload.
-class FirmwareUploadBackend {
+// Back the OTA route with the platform updater and its existing diagnostics.
+class FirmwareUpload final : public MDS_HTTPUpload {
 public:
+	// Keep the firmware field name and messages used by existing OTA clients.
+	explicit FirmwareUpload(const MDS_HTTP::UploadCompleteCallback& completeCallback)
+		: MDS_HTTPUpload("firmware", firmwareMessages()), completeCallback_(completeCallback) {
+	}
+
+private:
 	// Reserve space in the inactive firmware slot.
-	static bool begin() {
+	bool begin(const HTTPUpload&) override {
 #if defined(ARDUINO_ARCH_ESP8266)
 		// ESP8266 requires the available sketch space rather than an unknown length.
 		return Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000);
@@ -36,17 +44,17 @@ public:
 	}
 
 	// Treat a short write as a failed chunk.
-	static bool write(uint8_t* data, size_t size) {
+	bool write(uint8_t* data, size_t size) override {
 		return Update.write(data, size) == size;
 	}
 
 	// Validate and activate the image using the bytes received.
-	static bool commit() {
+	bool commit() override {
 		return Update.end(true);
 	}
 
 	// Release the updater without activating an unfinished image.
-	static void abort() {
+	void abort() override {
 #if defined(ARDUINO_ARCH_ESP8266)
 		// ESP8266 has no abort() API.
 		Update.end(false);
@@ -54,43 +62,36 @@ public:
 		Update.abort();
 #endif
 	}
+
+	// Schedule application work only once the HTTP response has been sent.
+	void onSuccess(MDS_HTTP&) override {
+		if (completeCallback_) {
+			completeCallback_();
+		}
+	}
+
+	// Preserve the existing OTA diagnostics and response body.
+	static Messages firmwareMessages() {
+		Messages messages;
+		messages.started = "OTA: Start ...";
+		messages.succeeded = "OTA: Success.";
+		messages.successResponse = "Update OK. Rebooting...\n";
+		messages.incomplete = "OTA: Missing or incomplete firmware upload";
+		messages.multiple = "OTA: Expected one firmware file";
+		messages.wrongField = "OTA: Expected firmware field";
+		messages.empty = "OTA: Empty firmware upload";
+		messages.startFailed = "OTA: Update.begin() failed";
+		messages.writeFailed = "OTA: Update.write() failed";
+		messages.commitFailed = "OTA: Update.end() failed";
+		messages.aborted = "OTA: Upload aborted";
+		return messages;
+	}
+
+	const MDS_HTTP::UploadCompleteCallback& completeCallback_;
 };
 
-} // namespace
-
-// Install upload routes only for applications that construct this optional feature.
-MDS_HTTP::MDS_HTTP(const Options& options, uint16_t port) : MDS_HTTP(port) {
-	if (options.firmwareUpload == UploadMode::Enabled) {
-		server_.on("/upload", HTTP_GET, [this]() {
-			// Serve the common firmware selection form.
-			handleUploadPage();
-		});
-		server_.on(
-			"/upload", HTTP_POST,
-			[this]() {
-				// Finish the response before the application schedules its reboot.
-				handleUploadPost();
-			},
-			[this]() {
-				// Process each multipart firmware chunk synchronously.
-				handleUploadStream();
-			});
-		cancelUpload_ = [this]() {
-			// Cancel a partial upload when the listener stops or is destroyed.
-			if (uploadActive_) {
-				abortUpload();
-				fail(Error::UploadAborted, "OTA: Upload aborted");
-				transitionTo(State::UploadComplete);
-			}
-
-			uploadSeen_ = false;
-			uploadComplete_ = false;
-		};
-	}
-}
-
 // Serve the existing browser form for uploading a firmware binary.
-void MDS_HTTP::handleUploadPage() {
+void sendFirmwarePage(MDS_HTTPServer& server) {
 	static const char uploadHtml[] =
 		"<!doctype html><html><head><meta charset='utf-8'>"
 		"<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -118,125 +119,175 @@ void MDS_HTTP::handleUploadPage() {
 		"</div>"
 		"</body></html>";
 
-	server_.send(200, "text/html", uploadHtml);
+	server.send(200, "text/html", uploadHtml);
 }
 
-// Respond only after a complete firmware image has been accepted by the updater.
-void MDS_HTTP::handleUploadPost() {
-	bool success = uploadComplete_ && uploadActive_ && error_ == Error::None;
+} // namespace
 
-	// Commit only after the complete multipart request has been accepted.
-	if (success) {
-		if (FirmwareUploadBackend::commit()) {
-			uploadActive_ = false;
-			clearError();
-			status("OTA: Success.");
-		} else {
-			abortUpload();
-			fail(Error::UploadFinalizeFailed, "OTA: Update.end() failed");
-			success = false;
-		}
+// Install firmware routes only when the application opts in.
+MDS_HTTP::MDS_HTTP(const Options& options, uint16_t port) : MDS_HTTP(port) {
+	if (options.firmwareUpload == UploadMode::Enabled) {
+		server_.on("/upload", HTTP_GET, [this]() {
+			// Serve the firmware selection form.
+			sendFirmwarePage(server_);
+		});
+
+		addUpload("/upload", std::unique_ptr<MDS_HTTPUpload>(new FirmwareUpload(uploadCompleteCallback_)));
 	}
+}
 
-	if (!success && error_ == Error::None) {
-		abortUpload();
-		fail(Error::InvalidUpload, "OTA: Missing or incomplete firmware upload");
-	}
-
-	uploadSeen_ = false;
-	uploadComplete_ = false;
-
-	if (!success) {
-		server_.send(500, "text/plain", lastError());
-		transitionTo(State::UploadComplete);
+// Install multipart callbacks and retain ownership for the lifetime of the route.
+void MDS_HTTP::addUpload(const char* route, std::unique_ptr<MDS_HTTPUpload> handler) {
+	if (!handler) {
 		return;
 	}
 
-	server_.send(200, "text/plain", "Update OK. Rebooting...\n");
-	transitionTo(State::UploadComplete);
-
-	if (uploadCompleteCallback_) {
-		uploadCompleteCallback_();
-	}
+	std::shared_ptr<MDS_HTTPUpload> ownedUpload(std::move(handler));
+	auto* upload = ownedUpload.get();
+	uploadCancellations_.push_back([this, ownedUpload]() {
+		// Retain the handler for the lifetime of the registered callbacks.
+		ownedUpload->cancel(*this);
+	});
+	server_.on(route, HTTP_POST, [this, upload]() {
+		// Commit only after the server has processed the complete request.
+		upload->handlePost(*this);
+	}, [this, upload]() {
+		// Forward each multipart event to this route's handler.
+		upload->handleStream(*this);
+	});
 }
 
-// Abort unfinished writes without validating or activating the partial image.
-void MDS_HTTP::abortUpload() {
-	if (uploadActive_) {
-		FirmwareUploadBackend::abort();
-		uploadActive_ = false;
+// Commit the upload and send the response before notifying a successful backend.
+void MDS_HTTPUpload::handlePost(MDS_HTTP& http) {
+	using Error = MDS_HTTP::Error;
+
+	if (complete_ && active_ && error_ == Error::None) {
+		if (commit()) {
+			active_ = false;
+			http.clearError();
+			http.status(messages_.succeeded);
+		} else {
+			abortWrite();
+			fail(http, MDS_HTTP::Error::UploadFinalizeFailed, messages_.commitFailed);
+		}
+	} else if (error_ == Error::None) {
+		abortWrite();
+		fail(http, MDS_HTTP::Error::InvalidUpload, messages_.incomplete);
 	}
 
-	uploadComplete_ = false;
+	seen_ = false;
+	complete_ = false;
+
+	if (error_ != Error::None) {
+		// Restore this route's result if another route has reported an error since.
+		http.error_ = error_;
+		http.errorText_ = errorText_;
+		http.server_.send(500, "text/plain", errorText_);
+		http.transitionTo(MDS_HTTP::State::UploadComplete);
+		return;
+	}
+
+	http.server_.send(200, "text/plain", messages_.successResponse);
+	http.transitionTo(MDS_HTTP::State::UploadComplete);
+	onSuccess(http);
 }
 
-// Handle multipart events without continuing a failed firmware write.
-void MDS_HTTP::handleUploadStream() {
-	HTTPUpload& upload = server_.upload();
+// Route each multipart event to the backend while keeping each request's state separate.
+void MDS_HTTPUpload::handleStream(MDS_HTTP& http) {
+	HTTPUpload& upload = http.server_.upload();
+	using Error = MDS_HTTP::Error;
+	using State = MDS_HTTP::State;
 
 	switch (upload.status) {
 		case UPLOAD_FILE_START:
-			if (uploadSeen_) {
-				abortUpload();
-				fail(Error::InvalidUpload, "OTA: Expected one firmware file");
-				transitionTo(State::UploadComplete);
+			if (seen_) {
+				abortWrite();
+				fail(http, Error::InvalidUpload, messages_.multiple);
+				http.transitionTo(State::UploadComplete);
 				return;
 			}
 
-			uploadSeen_ = true;
-			uploadComplete_ = false;
-			clearError();
-			transitionTo(State::Uploading);
-			status("OTA: Start ...");
+			seen_ = true;
+			complete_ = false;
+			error_ = Error::None;
+			errorText_ = "";
+			http.clearError();
+			http.transitionTo(State::Uploading);
+			http.status(messages_.started);
 
-			if (upload.name != "firmware") {
-				fail(Error::InvalidUpload, "OTA: Expected firmware field");
-				transitionTo(State::UploadComplete);
+			if (upload.name != field_) {
+				fail(http, Error::InvalidUpload, messages_.wrongField);
+				http.transitionTo(State::UploadComplete);
 				return;
 			}
 
-			if (!FirmwareUploadBackend::begin()) {
-				fail(Error::UploadStartFailed, "OTA: Update.begin() failed");
-				transitionTo(State::UploadComplete);
+			if (!begin(upload)) {
+				fail(http, Error::UploadStartFailed, messages_.startFailed);
+				http.transitionTo(State::UploadComplete);
 				return;
 			}
 
-			uploadActive_ = true;
+			active_ = true;
 			break;
 
 		case UPLOAD_FILE_WRITE:
-			if (!uploadActive_) {
-				return;
-			}
-
-			if (!FirmwareUploadBackend::write(upload.buf, upload.currentSize)) {
-				abortUpload();
-				fail(Error::UploadWriteFailed, "OTA: Update.write() failed");
-				transitionTo(State::UploadComplete);
+			if (active_ && !write(upload.buf, upload.currentSize)) {
+				abortWrite();
+				fail(http, Error::UploadWriteFailed, messages_.writeFailed);
+				http.transitionTo(State::UploadComplete);
 			}
 			break;
 
 		case UPLOAD_FILE_END:
-			if (!uploadActive_) {
+			if (!active_) {
 				return;
 			}
 
-			if (upload.totalSize == 0) {
-				abortUpload();
-				fail(Error::InvalidUpload, "OTA: Empty firmware upload");
-				transitionTo(State::UploadComplete);
+			if (!allowEmpty_ && upload.totalSize == 0) {
+				abortWrite();
+				fail(http, Error::InvalidUpload, messages_.empty);
+				http.transitionTo(State::UploadComplete);
 				return;
 			}
 
-			// The POST handler validates and activates the image after all form parts arrive.
-			uploadComplete_ = true;
+			// Wait for the POST callback in case another multipart part follows.
+			complete_ = true;
 			break;
 
 		case UPLOAD_FILE_ABORTED:
-			abortUpload();
-			uploadSeen_ = false;
-			fail(Error::UploadAborted, "OTA: Upload aborted");
-			transitionTo(State::UploadComplete);
+			abortWrite();
+			seen_ = false;
+			fail(http, Error::UploadAborted, messages_.aborted);
+			http.transitionTo(State::UploadComplete);
 			break;
 	}
+}
+
+// Clear multipart state and report cancellation only when storage was active.
+void MDS_HTTPUpload::cancel(MDS_HTTP& http) {
+	if (active_) {
+		abortWrite();
+		fail(http, MDS_HTTP::Error::UploadAborted, messages_.aborted);
+		http.transitionTo(MDS_HTTP::State::UploadComplete);
+	}
+
+	seen_ = false;
+	complete_ = false;
+}
+
+// Abort storage only once and discard any pending commit.
+void MDS_HTTPUpload::abortWrite() {
+	if (active_) {
+		abort();
+		active_ = false;
+	}
+
+	complete_ = false;
+}
+
+// Keep each route's response separate while updating the public diagnostics.
+void MDS_HTTPUpload::fail(MDS_HTTP& http, MDS_HTTP::Error error, const char* message) {
+	error_ = error;
+	errorText_ = message;
+	http.fail(error, message);
 }

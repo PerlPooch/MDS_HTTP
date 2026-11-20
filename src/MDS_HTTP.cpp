@@ -18,11 +18,9 @@
 MDS_HTTP::MDS_HTTP(uint16_t port) : server_(port) {
 }
 
-// Cancel any active firmware write before releasing the server.
+// Cancel any active upload before releasing the server.
 MDS_HTTP::~MDS_HTTP() {
-	if (cancelUpload_) {
-		cancelUpload_();
-	}
+	cancelUploads();
 }
 
 // Deliver a listener or upload status message through the application callback.
@@ -76,11 +74,8 @@ void MDS_HTTP::transitionTo(State next) {
 
 	const bool nextHasListener = isListenerState(next);
 	if (running() && !nextHasListener) {
-		if (cancelUpload_) {
-			// Cancellation reports upload completion before the listener leaves service.
-			cancelUpload_();
-		}
-
+		// Cancellation reports upload completion before the listener leaves service.
+		cancelUploads();
 		server_.stop();
 	} else if (!running() && nextHasListener) {
 		server_.begin();
@@ -128,5 +123,12 @@ void MDS_HTTP::updateListener() {
 		transitionTo(State::WaitingForNetwork);
 	} else if (!running()) {
 		transitionTo(State::Listening);
+	}
+}
+
+// Let every registered handler release pending storage before the listener stops.
+void MDS_HTTP::cancelUploads() {
+	for (const auto& cancel : uploadCancellations_) {
+		cancel();
 	}
 }
