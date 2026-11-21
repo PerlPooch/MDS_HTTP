@@ -60,6 +60,9 @@ protected:
 	// Release any pending write, including after a failed commit.
 	virtual void abort() = 0;
 
+	// Send the backend's HTTP response while preserving the shared upload lifecycle.
+	virtual void sendResponse(MDS_HTTPServer& server, MDS_HTTP::Error error, const char* message);
+
 	// Notify the backend after a successful HTTP response and state transition.
 	virtual void onSuccess(MDS_HTTP&) {
 	}

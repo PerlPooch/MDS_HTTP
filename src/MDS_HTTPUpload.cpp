@@ -182,14 +182,21 @@ void MDS_HTTPUpload::handlePost(MDS_HTTP& http) {
 		// Restore this route's result if another route has reported an error since.
 		http.error_ = error_;
 		http.errorText_ = errorText_;
-		http.server_.send(500, "text/plain", errorText_);
+		sendResponse(http.server_, error_, errorText_);
+		error_ = Error::None;
+		errorText_ = "";
 		http.transitionTo(MDS_HTTP::State::UploadComplete);
 		return;
 	}
 
-	http.server_.send(200, "text/plain", messages_.successResponse);
+	sendResponse(http.server_, Error::None, messages_.successResponse);
 	http.transitionTo(MDS_HTTP::State::UploadComplete);
 	onSuccess(http);
+}
+
+// Preserve the original response contract for ordinary upload handlers.
+void MDS_HTTPUpload::sendResponse(MDS_HTTPServer& server, MDS_HTTP::Error error, const char* message) {
+	server.send(error == MDS_HTTP::Error::None ? 200 : 500, "text/plain", message);
 }
 
 // Route each multipart event to the backend while keeping each request's state separate.
