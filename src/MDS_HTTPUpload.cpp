@@ -110,7 +110,7 @@ void sendFirmwarePage(MDS_HTTPServer& server) {
 		"</head><body>"
 		"<div class='card'>"
 		"<h3>Update Firmware</h3>"
-		"<form method='POST' action='/upload' enctype='multipart/form-data'>"
+		"<form method='POST' enctype='multipart/form-data'>"
 		"<div class='row'>"
 		"<input type='file' name='firmware' accept='.bin' required>"
 		"<button type='submit'>Update</button>"
@@ -124,16 +124,16 @@ void sendFirmwarePage(MDS_HTTPServer& server) {
 
 } // namespace
 
-// Install firmware routes only when the application opts in.
-MDS_HTTP::MDS_HTTP(const Options& options, uint16_t port) : MDS_HTTP(port) {
-	if (options.firmwareUpload == UploadMode::Enabled) {
-		server_.on("/upload", HTTP_GET, [this]() {
-			// Serve the firmware selection form.
+// Register firmware upload at the application route and optionally serve its form.
+void MDS_HTTP::addFirmwareUpload(const char* route, BrowserForm form) {
+	if (form == BrowserForm::Enabled) {
+		server_.on(route, HTTP_GET, [this]() {
+			// Serve a form that posts back to the current URL.
 			sendFirmwarePage(server_);
 		});
-
-		addUpload("/upload", std::unique_ptr<MDS_HTTPUpload>(new FirmwareUpload(uploadCompleteCallback_)));
 	}
+
+	addUpload(route, std::unique_ptr<MDS_HTTPUpload>(new FirmwareUpload(uploadCompleteCallback_)));
 }
 
 // Install multipart callbacks and retain ownership for the lifetime of the route.

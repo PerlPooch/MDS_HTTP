@@ -78,14 +78,17 @@ void loop() {
 ## Optional firmware upload
 
 The default `MDS_HTTP http;` creates no upload routes and does not link the upload
-implementation. Opt in at construction, before registering application routes:
+implementation. Register firmware upload at an application-selected route before
+starting the listener:
 
 ```cpp
-MDS_HTTP http(MDS_HTTP::Options{MDS_HTTP::UploadMode::Enabled});
+MDS_HTTP http;
 bool shouldReboot = false;
 
-// Register application-owned output and reboot policy before enabling HTTP.
-void configureUploadCallbacks() {
+// Register the firmware route, diagnostics, and reboot policy before enabling HTTP.
+void configureFirmwareUpload() {
+    http.addFirmwareUpload("/admin/firmware", MDS_HTTP::BrowserForm::Enabled);
+
     http.setStatusCallback([](const String& message) {
         // Send library diagnostics to the application output.
         Serial.println(message);
@@ -98,8 +101,9 @@ void configureUploadCallbacks() {
 }
 ```
 
-This registers GET and POST `/upload`, including the browser form. Upload one
-firmware binary in the `firmware` multipart field. The board updater validates
+This registers POST `/admin/firmware` and serves the browser form with GET at
+the same URL. Omit the `BrowserForm` argument for a POST-only route. Upload
+one firmware binary in the `firmware` multipart field. The board updater validates
 the image before the success response. The library does not reboot; the
 application handles `shouldReboot` after servicing HTTP. Both callback setters
 accept `nullptr` to clear their callback. With no status callback, uploads are

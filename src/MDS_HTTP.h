@@ -40,7 +40,7 @@ public:
 		UploadComplete
 	};
 
-	enum class UploadMode {
+	enum class BrowserForm {
 		Disabled,
 		Enabled
 	};
@@ -54,10 +54,6 @@ public:
 		UploadAborted
 	};
 
-	struct Options {
-		UploadMode firmwareUpload = UploadMode::Disabled;
-	};
-
 	// Report whether the network can accept HTTP requests.
 	using ReadinessCallback = std::function<bool()>;
 
@@ -69,9 +65,6 @@ public:
 
 	// Construct the owned WebServer on port (80 by default).
 	explicit MDS_HTTP(uint16_t port = 80);
-
-	// Register optional firmware upload routes before the server starts listening.
-	explicit MDS_HTTP(const Options& options, uint16_t port = 80);
 
 	// Cancel any active upload before releasing the server.
 	~MDS_HTTP();
@@ -145,6 +138,9 @@ public:
 	void setUploadCompleteCallback(UploadCompleteCallback callback) {
 		uploadCompleteCallback_ = callback;
 	}
+
+	// Register firmware POST and optionally a GET form at the same route before begin().
+	void addFirmwareUpload(const char* route, BrowserForm form = BrowserForm::Disabled);
 
 	// Register a unique multipart POST route before starting the server.
 	void addUpload(const char* route, std::unique_ptr<MDS_HTTPUpload> handler);

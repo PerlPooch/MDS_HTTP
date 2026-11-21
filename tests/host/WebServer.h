@@ -97,7 +97,7 @@ public:
 	}
 
 	// Deliver a complete request through the registered route.
-	void request(HTTPMethod method) {
-		handlers.at({"/upload", method})();
+	void request(HTTPMethod method, const char* path = "/upload") {
+		handlers.at({path, method})();
 	}
 };

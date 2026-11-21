@@ -21,10 +21,10 @@
 
 using State = MDS_HTTP::State;
 using Error = MDS_HTTP::Error;
-using UploadMode = MDS_HTTP::UploadMode;
+using BrowserForm = MDS_HTTP::BrowserForm;
 
 // Deliver a complete valid firmware image followed by the POST completion handler.
-static void upload(MDS_HTTP& http) {
+static void upload(MDS_HTTP& http, const char* route = "/upload") {
 	auto& server = http.server();
 	server.chunk(UPLOAD_FILE_START);
 	assert(http.running());
@@ -34,7 +34,7 @@ static void upload(MDS_HTTP& http) {
 	if (http.error() == Error::None) {
 		assert(http.state() == State::Uploading);
 	}
-	server.request(HTTP_POST);
+	server.request(HTTP_POST, route);
 	assert(http.state() == State::UploadComplete && http.running());
 }
 
@@ -71,9 +71,33 @@ private:
 	}
 };
 
+// Verify custom firmware routes and POST-only registration.
+static void testFirmwareRoutes() {
+	MDS_HTTP http;
+	http.addFirmwareUpload("/admin/firmware", BrowserForm::Enabled);
+	auto& server = http.server();
+	assert(server.handlers.size() == 2);
+	server.request(HTTP_GET, "/admin/firmware");
+	assert(server.code == 200 && server.body.find("multipart/form-data") != String::npos);
+	assert(server.body.find("action=") == String::npos);
+
+	http.addFirmwareUpload("/maintenance/firmware");
+	assert(server.handlers.size() == 3);
+	http.setNetworkReadyCallback([]() {
+		// Keep the listener active during the POST-only upload.
+		return true;
+	});
+	http.begin();
+
+	const int firmwareEnds = Update.ends;
+	upload(http, "/maintenance/firmware");
+	assert(server.code == 200 && Update.ends == firmwareEnds + 1);
+}
+
 // Verify coexistence, per-route failures and shutdown for a second backend.
 static void testFileRoute() {
-	MDS_HTTP http(MDS_HTTP::Options{UploadMode::Enabled});
+	MDS_HTTP http;
+	http.addFirmwareUpload("/upload", BrowserForm::Enabled);
 	auto& server = http.server();
 	const auto firmwareStream = server.stream;
 	auto* file = new TestFileUpload();
@@ -113,9 +137,10 @@ static void testFileRoute() {
 
 // Verify optional routes, failure recovery, callbacks and update resource cleanup.
 int main() {
-	MDS_HTTP disabled(MDS_HTTP::Options{});
+	MDS_HTTP disabled;
 	assert(disabled.server().handlers.empty());
-	MDS_HTTP http(MDS_HTTP::Options{UploadMode::Enabled});
+	MDS_HTTP http;
+	http.addFirmwareUpload("/upload", BrowserForm::Enabled);
 	auto& server = http.server();
 	assert(server.handlers.size() == 2);
 	int completions = 0;
@@ -152,7 +177,7 @@ int main() {
 	});
 	messages.clear();
 	server.request(HTTP_GET);
-	assert(server.code == 200 && server.body.find("/upload") != String::npos);
+	assert(server.code == 200 && server.body.find("multipart/form-data") != String::npos);
 	server.request(HTTP_POST);
 	assert(server.code == 500 && completions == 0 && Update.begins == 0);
 	assert(http.error() == Error::InvalidUpload);
@@ -305,7 +330,8 @@ int main() {
 
 	const int beforeDestruction = Update.aborts;
 	{
-		MDS_HTTP partial(MDS_HTTP::Options{UploadMode::Enabled});
+		MDS_HTTP partial;
+		partial.addFirmwareUpload("/upload", BrowserForm::Enabled);
 		partial.setNetworkReadyCallback([]() {
 			// Supply connectivity before starting the destructor-cleanup scenario.
 			return true;
@@ -316,5 +342,6 @@ int main() {
 	}
 	assert(Update.aborts == beforeDestruction + 1 && !Update.active);
 	testFileRoute();
+	testFirmwareRoutes();
 	puts("PASS: HTTP uploads, failures, callback ordering, reconnect and partial-image cleanup.");
 }
